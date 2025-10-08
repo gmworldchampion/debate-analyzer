@@ -9,11 +9,14 @@ uploaded_files = st.file_uploader(
     type="csv"
 )
 
-if uploaded_files:
+# Add a start button
+if uploaded_files and st.button("Start Analysis"):
     # Combine all uploaded CSVs
     dfs = [pd.read_csv(f) for f in uploaded_files]
     all_data = pd.concat(dfs)
     all_data.columns = [c.strip().lower() for c in all_data.columns]
+
+    st.success("✅ Done! Results:")
 
     # -------- TEAM LEADERBOARD --------
     if "team" in all_data.columns and "wins" in all_data.columns:
