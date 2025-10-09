@@ -1,91 +1,109 @@
 import streamlit as st
 import pandas as pd
 import re
+from io import StringIO
 
-st.title("🏆 Debate Tournament Analyzer (Tabroom CSVs)")
-
-uploaded_files = st.file_uploader(
-    "Upload multiple Tabroom round CSVs",
-    accept_multiple_files=True,
-    type="csv"
-)
-
+# --- Helper to extract numeric speaker points ---
 def extract_speaker_points(points_str):
-    """Extract numeric speaker points from Tabroom points column"""
-    numbers = re.findall(r"\d+\.?\d*", points_str)
-    numbers = [float(n) for n in numbers]
-    if numbers:
-        return sum(numbers) / len(numbers)
-    return 0
+    try:
+        return float(re.findall(r"\d+(?:\.\d+)?", str(points_str))[0])
+    except:
+        return 0.0
 
-if uploaded_files and st.button("Start Analysis"):
-    dfs = [pd.read_csv(f) for f in uploaded_files]
-    all_data = pd.concat(dfs, ignore_index=True)
+# --- Header ---
+st.title("🏆 Multi-Tournament Debate Leaderboard Analyzer")
 
-    # Clean column names
-    all_data.columns = all_data.columns.str.strip()
-    all_data.columns = all_data.columns.str.replace(r"\s+", " ", regex=True)
-    all_data.columns = all_data.columns.str.replace('"', '')
+st.markdown("""
+Upload CSV files for each round **within each tournament**, then click **Start**.  
+You’ll get:
+- Round-by-round team results  
+- Speaker points leaderboard  
+- Cross-tournament stats (top speakers & teams)
+""")
 
-    # Debug: show available columns
-    st.write("Detected columns:", list(all_data.columns))
+# --- Data structure to hold tournaments ---
+if "tournaments" not in st.session_state:
+    st.session_state.tournaments = {}
 
-    # Try to detect the 'Aff Points' and 'Neg Points' columns dynamically
-    aff_col = next((c for c in all_data.columns if "Aff" in c and "Point" in c), None)
-    neg_col = next((c for c in all_data.columns if "Neg" in c and "Point" in c), None)
+# --- Add new tournament section ---
+tournament_name = st.text_input("🏟️ Tournament name (e.g. MinneApple, Blake, Roseville):")
 
-    if not aff_col or not neg_col:
-        st.error("Couldn't find 'Aff Points' or 'Neg Points' columns. Please check the column names above.")
-        st.stop()
+if tournament_name:
+    uploaded_files = st.file_uploader(
+        f"Upload round CSVs for {tournament_name} (one per round):",
+        accept_multiple_files=True,
+        type=["csv"]
+    )
 
-    team_records = []
-    speaker_records = []
+    if uploaded_files:
+        rounds = []
+        for file in uploaded_files:
+            df = pd.read_csv(file)
+            rounds.append(df)
+        st.session_state.tournaments[tournament_name] = rounds
+        st.success(f"✅ Added {len(rounds)} rounds for {tournament_name}")
 
-    for idx, row in all_data.iterrows():
-        aff_team = row["Aff"]
-        neg_team = row["Neg"]
-        winner = str(row["Win"]).strip()
+# --- Start button ---
+if st.button("🚀 Start Analysis"):
+    all_team_results = []
+    all_speaker_results = []
 
-        aff_win = 1 if winner == "Aff" else 0
-        neg_win = 1 if winner == "Neg" else 0
+    # --- Process tournaments ---
+    for tournament, rounds in st.session_state.tournaments.items():
+        st.subheader(f"📊 Tournament: {tournament}")
 
-        aff_speaks = extract_speaker_points(str(row[aff_col]))
-        neg_speaks = extract_speaker_points(str(row[neg_col]))
+        team_speaks = {}
+        speaker_speaks = {}
 
-        team_records.append({"team": aff_team, "wins": aff_win, "losses": 1 - aff_win, "speaks": aff_speaks})
-        team_records.append({"team": neg_team, "wins": neg_win, "losses": 1 - neg_win, "speaks": neg_speaks})
+        # Process each round
+        for df in rounds:
+            for _, row in df.iterrows():
+                # Extract Aff and Neg teams + points
+                aff_team = str(row.get("Aff", "Unknown")).strip()
+                neg_team = str(row.get("Neg", "Unknown")).strip()
+                aff_points = extract_speaker_points(row.get("Aff Points", 0))
+                neg_points = extract_speaker_points(row.get("Neg Points", 0))
+                aff_speakers = [s.strip() for s in str(row.get("Aff Speakers", "")).split(",")]
+                neg_speakers = [s.strip() for s in str(row.get("Neg Speakers", "")).split(",")]
 
-        aff_speakers = re.findall(r"([A-Za-z][A-Za-z\s]+)\s+\d+\.?\d*", str(row[aff_col]))
-        neg_speakers = re.findall(r"([A-Za-z][A-Za-z\s]+)\s+\d+\.?\d*", str(row[neg_col]))
+                # Update team speaks
+                team_speaks[aff_team] = team_speaks.get(aff_team, 0) + aff_points
+                team_speaks[neg_team] = team_speaks.get(neg_team, 0) + neg_points
 
-        for spk_name, spk_score in zip(aff_speakers, re.findall(r"\d+\.?\d*", str(row[aff_col]))):
-            speaker_records.append({"speaker": spk_name.strip(), "speaks": float(spk_score), "rounds": 1})
-        for spk_name, spk_score in zip(neg_speakers, re.findall(r"\d+\.?\d*", str(row[neg_col]))):
-            speaker_records.append({"speaker": spk_name.strip(), "speaks": float(spk_score), "rounds": 1})
+                # Update speaker speaks
+                for s in aff_speakers:
+                    speaker_speaks[s] = speaker_speaks.get(s, 0) + (aff_points / len(aff_speakers) if aff_speakers else 0)
+                for s in neg_speakers:
+                    speaker_speaks[s] = speaker_speaks.get(s, 0) + (neg_points / len(neg_speakers) if neg_speakers else 0)
 
-    # Team leaderboard
-    team_df = pd.DataFrame(team_records)
-    team_stats = team_df.groupby("team").agg({
-        "wins": "sum",
-        "losses": "sum",
-        "speaks": "mean"
-    }).reset_index()
-    team_stats["win_rate"] = team_stats["wins"] / (team_stats["wins"] + team_stats["losses"])
-    team_stats["prediction_score"] = (0.6 * team_stats["win_rate"]) + (0.4 * (team_stats["speaks"] / 30))
-    team_leaderboard = team_stats.sort_values("prediction_score", ascending=False)
+        # --- Tournament leaderboards ---
+        team_df = pd.DataFrame(list(team_speaks.items()), columns=["Team", "Total Speaks"]).sort_values(by="Total Speaks", ascending=False)
+        speaker_df = pd.DataFrame(list(speaker_speaks.items()), columns=["Speaker", "Total Speaks"]).sort_values(by="Total Speaks", ascending=False)
 
-    st.success("✅ Done! Results:")
-    st.subheader("Team Leaderboard + Predictions")
-    st.dataframe(team_leaderboard[["team", "win_rate", "speaks", "prediction_score"]].head(10))
+        st.write("🏅 **Team Leaderboard:**")
+        st.dataframe(team_df)
 
-    # Speaker leaderboard
-    speaker_df = pd.DataFrame(speaker_records)
-    speaker_stats = speaker_df.groupby("speaker").agg({
-        "speaks": "mean",
-        "rounds": "sum"
-    }).reset_index()
-    speaker_leaderboard = speaker_stats.sort_values("speaks", ascending=False)
+        st.write("🎤 **Speaker Leaderboard:**")
+        st.dataframe(speaker_df)
 
-    st.subheader("Speaker Leaderboard")
-    st.dataframe(speaker_leaderboard.head(10))
+        all_team_results.extend(team_df.values.tolist())
+        all_speaker_results.extend(speaker_df.values.tolist())
+
+    # --- Global leaderboards ---
+    st.header("🌍 Cross-Tournament Rankings")
+
+    # Combine across tournaments
+    global_teams = pd.DataFrame(all_team_results, columns=["Team", "Total Speaks"]).groupby("Team", as_index=False).sum()
+    global_speakers = pd.DataFrame(all_speaker_results, columns=["Speaker", "Total Speaks"]).groupby("Speaker", as_index=False).sum()
+
+    global_teams = global_teams.sort_values(by="Total Speaks", ascending=False)
+    global_speakers = global_speakers.sort_values(by="Total Speaks", ascending=False)
+
+    st.subheader("🏆 Best Teams Across All Tournaments")
+    st.dataframe(global_teams)
+
+    st.subheader("🎙️ Best Speakers Across All Tournaments")
+    st.dataframe(global_speakers)
+
+    st.success("✅ Done! Results below 🎉")
 
